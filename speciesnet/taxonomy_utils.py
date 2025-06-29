@@ -113,3 +113,63 @@ def get_full_class_string(label: str) -> str:
             f"{label}"
         )
     return ";".join(label_parts[1:6])
+
+
+def get_species_to_sibling_species_map(taxonomy_map: dict) -> dict[str, list[str]]:
+    """
+    Returns a mapping from each species label to a list of all other species labels in the same genus.
+
+    Args:
+        taxonomy_map: Dictionary mapping taxa (full class strings) to labels.
+
+    Returns:
+        Dictionary where keys are species labels (full label strings) and values are lists of sibling species labels (excluding itself).
+    """
+    species_taxa = [taxa for taxa in taxonomy_map.values()]
+    genus_to_species = {}
+    for taxa in species_taxa:
+        genus = taxa.split(";")[:5]
+        if genus:
+            genus_to_species.setdefault(genus, []).append(taxa)
+    species_to_siblings = {}
+    for taxa in species_taxa:
+        genus = taxa.split(";")[:5]
+        if genus:
+            siblings = [sib_taxa for sib_taxa in genus_to_species[genus] if sib_taxa != taxa]
+            species_to_siblings[taxa] = siblings
+    return species_to_siblings
+
+
+def get_genus_to_species_dict(taxonomy_map: dict) -> dict[tuple, list[str]]:
+    """
+    Returns a mapping from genus (as a tuple of class, order, family, genus) to a list of all species labels in that genus.
+
+    Args:
+        taxonomy_map: Dictionary mapping taxa (full class strings) to labels.
+
+    Returns:
+        Dictionary where keys are genus tuples and values are lists of species labels (full label strings).
+    """
+    species_labels = [label for label in taxonomy_map.values() if isinstance(label, str) and label.count(";") == 6]
+    genus_to_species = {}
+    for label in species_labels:
+        genus_tuple = tuple(label.split(";")[:5])
+        if all(genus_tuple):
+            genus_to_species.setdefault(genus_tuple, []).append(label)
+    return genus_to_species
+
+
+def get_sibling_species(label: str, genus_to_species: dict) -> list[str]:
+    """
+    Returns a list of sibling species labels for the given label using the genus_to_species dict.
+
+    Args:
+        label: Full label string for the species.
+        genus_to_species: Dict mapping genus tuples to lists of species labels.
+
+    Returns:
+        List of sibling species labels (excluding the input label).
+    """
+    genus_tuple = tuple(label.split(";")[:5])
+    siblings = [l for l in genus_to_species.get(genus_tuple, []) if l != label]
+    return siblings

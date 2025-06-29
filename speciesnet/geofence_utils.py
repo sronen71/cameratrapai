@@ -23,6 +23,8 @@ from typing import Optional
 from speciesnet.constants import Classification
 from speciesnet.taxonomy_utils import get_ancestor_at_level
 from speciesnet.taxonomy_utils import get_full_class_string
+from speciesnet.taxonomy_utils import get_sibling_species
+
 
 # Handy type aliases.
 PredictionLabelType = str
@@ -68,6 +70,7 @@ def should_geofence_animal_classification(
 
     # Do not geofence if full class string is missing from the geofence map.
     full_class_string = get_full_class_string(label)
+
     if full_class_string not in geofence_map:
         return False
 
@@ -278,3 +281,57 @@ def geofence_animal_classification(
             )
     else:
         return labels[0], scores[0], "classifier"
+
+
+def redistribute_geofenced_species_scores(
+    labels: list[str],
+    scores: list[float],
+    country: Optional[str],
+    admin1_region: Optional[str],
+    genus_to_species: dict,
+    geofence_map: dict,
+    enable_geofence: bool = True,
+) -> list[float]:
+    """
+    For each label not allowed in the location, find all sibling species (same genus)
+    that are allowed. Distribute the label's score evenly among siblings and set its
+    own score to 0. If no siblings are allowed, set its score to 0. Rescale probabilities
+    to sum to 1 at the end.
+
+    Args:
+        labels: List of species labels.
+        scores: List of probabilities (should sum to 1).
+        country: Country code.
+        admin1_region: Admin1 region code.
+        taxonomy_map: Taxonomy mapping.
+        geofence_map: Geofence mapping.
+        genus_to_species: Dict mapping genus (tuple) to list of species labels.
+        enable_geofence: Whether to apply geofencing.
+
+    Returns:
+        List of adjusted scores (same order as input labels).
+    """
+    adjusted_scores = scores.copy()
+    label_to_idx = {label: i for i, label in enumerate(labels)}
+
+    def is_allowed(label):
+        return not should_geofence_animal_classification(
+            label, country, admin1_region, geofence_map, enable_geofence
+        )
+
+    for i, label in enumerate(labels):
+        if is_allowed(label):
+            continue
+        # Use utility to get siblings for this label
+        sibling_labels = [sib for sib in get_sibling_species(label, genus_to_species) if sib in label_to_idx and is_allowed(sib)]
+        if sibling_labels:
+            share = adjusted_scores[i] / len(sibling_labels)
+            for sib in sibling_labels:
+                adjusted_scores[label_to_idx[sib]] += share
+        adjusted_scores[i] = 0.0
+
+    total = sum(adjusted_scores)
+    if total > 0 and total < 1.:
+        adjusted_scores = [score / total for score in adjusted_scores]
+
+    return adjusted_scores

@@ -30,6 +30,8 @@ from speciesnet.constants import Failure
 from speciesnet.ensemble_prediction_combiner import combine_predictions_for_single_item
 from speciesnet.geofence_utils import geofence_animal_classification
 from speciesnet.geofence_utils import roll_up_labels_to_first_matching_level
+from speciesnet.taxonomy_utils import get_genus_to_species_dict
+from speciesnet.geofence_utils import redistribute_geofenced_species_scores
 from speciesnet.utils import ModelInfo
 
 # Handy type aliases.
@@ -66,6 +68,7 @@ class SpeciesNetEnsemble:
         self.taxonomy_map = self.load_taxonomy()
         self.geofence_map = self.load_geofence()
         self.prediction_combiner = prediction_combiner
+        self.genus_to_species = get_genus_to_species_dict(self.taxonomy_map)
 
         end_time = time.time()
         logging.info(
@@ -183,9 +186,36 @@ class SpeciesNetEnsemble:
             result = {key: value for key, value in result.items() if value is not None}
 
             # Most importantly, ensemble everything into a single prediction.
+
+
+
+
+
             if classifications is not None and detections is not None:
+                if self.enable_geofence:
+                    adjusted_scores = redistribute_geofenced_species_scores(
+                        labels=classifications["classes"],
+                        scores=classifications["scores"],
+                        country=geolocation.get("country"),
+                        admin1_region=geolocation.get("admin1_region"),
+                        genus_to_species=self.genus_to_species,
+                        geofence_map=self.geofence_map,
+                    )
+                    # Sort adjust_classifications by adjusted score descending
+                    sorted_pairs = sorted(
+                        zip(classifications["classes"], adjusted_scores), key=lambda x: x[1], reverse=True
+                    )
+                    adjusted_classifications = {
+                        "classes": [c for c, s in sorted_pairs],
+                        "scores": [s for c, s in sorted_pairs],
+                    }
+                else:
+                    adjusted_classifications = classifications
+
+
+
                 prediction, score, source = self.prediction_combiner(
-                    classifications=classifications,
+                    classifications=adjusted_classifications,
                     detections=detections,
                     country=geolocation.get("country"),
                     admin1_region=geolocation.get("admin1_region"),
