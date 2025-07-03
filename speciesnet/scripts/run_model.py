@@ -33,6 +33,7 @@ from speciesnet import SpeciesNet
 from speciesnet.ensemble_prediction_combiner import PredictionType
 from speciesnet.utils import load_partial_predictions
 from speciesnet.utils import prepare_instances_dict
+from speciesnet.postprocessing import apply_cervidae_rule
 
 _MODEL = flags.DEFINE_string(
     "model",
@@ -446,6 +447,8 @@ def main(argv: list[str]) -> None:
             predictions_json=_PREDICTIONS_JSON.value,
         )
     if predictions_dict is not None:
+        processed_predictions = apply_cervidae_rule(list(predictions_dict.values()))
+        predictions_dict = {p["filepath"]: p for p in processed_predictions}
         print(
             "Predictions:\n"
             + json.dumps(predictions_dict, ensure_ascii=False, indent=4)
