@@ -384,6 +384,7 @@ def main(argv: list[str]) -> None:
         # Uncomment the line below if you want to run your own custom ensembling
         # routine. And also, implement that routine! :-)
         # combine_predictions_fn=custom_combine_predictions_fn,
+        postprocess_classifications_fn=apply_cervidae_rule,
         multiprocessing=(run_mode == "multi_process"),
     )
     if hasattr(model, "classifier") and not hasattr(model, "detector"):
@@ -447,8 +448,6 @@ def main(argv: list[str]) -> None:
             predictions_json=_PREDICTIONS_JSON.value,
         )
     if predictions_dict is not None:
-        processed_predictions = apply_cervidae_rule(list(predictions_dict.values()))
-        predictions_dict = {p["filepath"]: p for p in processed_predictions}
         print(
             "Predictions:\n"
             + json.dumps(predictions_dict, ensure_ascii=False, indent=4)

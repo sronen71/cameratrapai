@@ -28,13 +28,17 @@ import multiprocessing as mp
 from multiprocessing.managers import SyncManager
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
+import os
 import queue
 import threading
 import traceback
+from datetime import datetime
 from typing import Callable, Literal, Optional, Union
 
 from absl import logging
 from tqdm import tqdm
+import PIL.Image
+import PIL.ExifTags
 
 from speciesnet.classifier import SpeciesNetClassifier
 from speciesnet.constants import Failure
@@ -60,6 +64,39 @@ ClassifierInput = tuple[str, Optional[PreprocessedImage]]
 SyncManager.register("Classifier", SpeciesNetClassifier)
 SyncManager.register("Detector", SpeciesNetDetector)
 SyncManager.register("Ensemble", SpeciesNetEnsemble)
+
+
+def extract_datetime_from_image(filepath: str) -> Optional[str]:
+    """Extract datetime from image EXIF data or file modification time.
+
+    Args:
+        filepath: Path to the image file.
+
+    Returns:
+        ISO 8601 formatted datetime string, or None if extraction fails.
+    """
+    try:
+        # Try to extract EXIF DateTimeOriginal
+        img = PIL.Image.open(filepath)
+        exif = img._getexif()
+        if exif:
+            # Look for DateTimeOriginal tag
+            for tag_id in exif:
+                tag = PIL.ExifTags.TAGS.get(tag_id, tag_id)
+                if tag == "DateTimeOriginal":
+                    dt_str = exif[tag_id]
+                    # Parse and format as ISO 8601
+                    dt = datetime.strptime(dt_str, "%Y:%m:%d %H:%M:%S")
+                    return dt.isoformat()
+
+        # Fallback to file modification time
+        mtime = os.path.getmtime(filepath)
+        dt = datetime.fromtimestamp(mtime)
+        return dt.isoformat()
+
+    except Exception as e:
+        logging.warning(f"Failed to extract datetime from {filepath}: {e}")
+        return None
 
 
 class RepeatedAction(threading.Thread):
@@ -364,6 +401,7 @@ def _combine_results(  # pylint: disable=too-many-positional-arguments
     detector_results: dict[str, dict],
     geolocation_results: dict[str, dict],
     partial_predictions: dict[str, dict],
+    postprocess_classifications_fn: Optional[Callable] = None,
     predictions_json: Optional[StrPath] = None,
     save_lock: Optional[threading.Lock] = None,
 ) -> Optional[dict]:
@@ -391,6 +429,8 @@ def _combine_results(  # pylint: disable=too-many-positional-arguments
             Dict of partial predictions from previous ensemblings, with keys given by
             the filepaths for which predictions where already ensembled. Used to skip
             re-ensembling for the matching filepaths.
+        postprocess_classifications_fn:
+            Function to post-process classification predictions. Optional.
         predictions_json:
             Output filepath where to save the predictions dict in JSON format. If
             `None`, predictions are not saved to a file and are returned instead.
@@ -404,6 +444,12 @@ def _combine_results(  # pylint: disable=too-many-positional-arguments
         to `None`, otherwise return `None` since predictions are saved to a file.
     """
 
+    if postprocess_classifications_fn:
+        processed_predictions = postprocess_classifications_fn(
+            list(classifier_results.values())
+        )
+        classifier_results = {p["filepath"]: p for p in processed_predictions}
+
     ensemble_results = ensemble.combine(
         filepaths=filepaths,
         classifier_results=classifier_results,
@@ -411,6 +457,14 @@ def _combine_results(  # pylint: disable=too-many-positional-arguments
         geolocation_results=geolocation_results,
         partial_predictions=partial_predictions,
     )
+
+    # Add datetime information to each prediction
+    for result in ensemble_results:
+        if "filepath" in result:
+            datetime_str = extract_datetime_from_image(result["filepath"])
+            if datetime_str:
+                result["datetime"] = datetime_str
+
     predictions_dict = {"predictions": ensemble_results}
     if predictions_json:
         if save_lock:
@@ -562,6 +616,7 @@ class SpeciesNet:
         geofence: bool = True,
         target_species_txt: Optional[str] = None,
         combine_predictions_fn: Callable = combine_predictions_for_single_item,
+        postprocess_classifications_fn: Optional[Callable] = None,
         multiprocessing: bool = False,
     ) -> None:
         """Initializes the SpeciesNet model with specified settings.
@@ -581,10 +636,13 @@ class SpeciesNet:
             combine_predictions_fn:
                 Function to tell the ensemble how to combine predictions from the
                 individual model components (e.g. classifications, detections etc.)
+            postprocess_classifications_fn:
+                Function to post-process classification predictions. Optional.
             multiprocessing:
                 Whether to enable multiprocessing or not. Defaults to `False`.
         """
 
+        self.postprocess_classifications_fn = postprocess_classifications_fn
         if multiprocessing:
             self.manager = SyncManager()
             self.manager.start()  # pylint: disable=consider-using-with
@@ -755,6 +813,7 @@ class SpeciesNet:
             detector_results=detector_results,
             geolocation_results=geolocation_results,
             partial_predictions=partial_predictions,
+            postprocess_classifications_fn=self.postprocess_classifications_fn,
             predictions_json=predictions_json,
             save_lock=save_lock,
         )
@@ -957,6 +1016,7 @@ class SpeciesNet:
             detector_results=detector_results,
             geolocation_results=geolocation_results,
             partial_predictions=partial_predictions,
+            postprocess_classifications_fn=self.postprocess_classifications_fn,
             predictions_json=predictions_json,
             save_lock=save_lock,
         )
@@ -1110,6 +1170,13 @@ class SpeciesNet:
         # Stop the periodic saver if an output file was specified.
         if predictions_json:
             _stop_periodic_results_saving(periodic_saver)
+
+        # Post-process classifications.
+        if self.postprocess_classifications_fn:
+            processed_predictions = self.postprocess_classifications_fn(
+                list(classifier_results.values())
+            )
+            classifier_results = {p["filepath"]: p for p in processed_predictions}
 
         # Return predictions.
         return _merge_results(
@@ -1374,6 +1441,7 @@ class SpeciesNet:
             detector_results=detector_results,
             geolocation_results=geolocation_results,
             partial_predictions=partial_predictions,
+            postprocess_classifications_fn=self.postprocess_classifications_fn,
             predictions_json=predictions_json,
             save_lock=save_lock,
         )
