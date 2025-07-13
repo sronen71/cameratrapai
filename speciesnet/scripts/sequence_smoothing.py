@@ -78,7 +78,7 @@ def smooth_classification_results_sequence_level(
         if not val:
             return True
         last_label = val.split(";")[-1].strip()
-        return last_label == "blank"
+        return last_label == "blank" or last_label == "no cv result"
 
     sequences = group_into_sequences(predictions, time_gap_minutes, group_by_folder)
     smoothed = []
