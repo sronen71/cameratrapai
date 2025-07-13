@@ -14,8 +14,6 @@
 
 """Post-processing functions for SpeciesNet predictions."""
 
-from typing import Any
-
 # IMPORTANT: Replace these with the actual labels from your taxonomy file.
 ELK_LABEL = "c5ce946f-8f0d-4379-992b-cc0982381f5e;mammalia;cetartiodactyla;cervidae;cervus;canadensis;elk"
 RED_DEER_LABEL = "eb3829b0-772e-4088-ae90-f11b9fe38284;mammalia;cetartiodactyla;cervidae;cervus;elaphus;red deer"
@@ -23,7 +21,7 @@ MULE_DEER_LABEL = "febff896-db40-4ac8-bcfe-5bb99a600950;mammalia;cetartiodactyla
 CERVUS_LABEL = "9388f0bc-910e-4324-84de-414feca9b4f7;mammalia;cetartiodactyla;cervidae;cervus;;cervus species"
 
 
-def apply_cervidae_rule(predictions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def apply_cervidae_rule(predictions):
     """Applies custom rules to down-weight non-elk/mule deer Cervidae and remap red deer to elk."""
 
     for prediction in predictions:

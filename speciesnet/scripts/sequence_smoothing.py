@@ -17,47 +17,76 @@ def save_json(obj, path):
         json.dump(obj, f, indent=2)
 
 
-def group_into_sequences(predictions, time_gap_minutes=3):
+def group_into_sequences(predictions, time_gap_minutes=3, group_by_folder=False):
     """
-    Group images into sequences based on time gap between consecutive images.
+    Group images into sequences based on time gap between consecutive images or by folder.
     Returns a list of (seq_id, [prediction_dicts]).
     """
-    # Sort by datetime
-    preds_with_dt = [p for p in predictions if "datetime" in p]
-    preds_with_dt.sort(key=lambda p: p["datetime"])
+    if group_by_folder:
+        # Group by folder (using 'filepath' field)
+        from collections import defaultdict
 
-    sequences = []
-    current_seq = []
-    last_dt = None
-    seq_counter = 0
-    for p in preds_with_dt:
-        dt = datetime.fromisoformat(p["datetime"])
-        if last_dt is None or (dt - last_dt) > timedelta(minutes=time_gap_minutes):
-            # Start new sequence
-            if current_seq:
-                sequences.append((f"seq_{seq_counter}", current_seq))
-                seq_counter += 1
-            current_seq = [p]
-        else:
-            current_seq.append(p)
-        last_dt = dt
-    if current_seq:
-        sequences.append((f"seq_{seq_counter}", current_seq))
-    return sequences
+        folder_groups = defaultdict(list)
+        for p in predictions:
+            folder = os.path.dirname(p.get("filepath", ""))
+            folder_groups[folder].append(p)
+        sequences = []
+        seq_counter = 0
+        for folder, preds in folder_groups.items():
+            seq_id = f"folder_{os.path.basename(folder) or 'root'}_{seq_counter}"
+            sequences.append((seq_id, preds))
+            seq_counter += 1
+        return sequences
+    else:
+        # Sort by datetime
+        preds_with_dt = [p for p in predictions if "datetime" in p]
+        preds_with_dt.sort(key=lambda p: p["datetime"])
+
+        sequences = []
+        current_seq = []
+        last_dt = None
+        seq_counter = 0
+        for p in preds_with_dt:
+            dt = datetime.fromisoformat(p["datetime"])
+            if last_dt is None or (dt - last_dt) > timedelta(minutes=time_gap_minutes):
+                # Start new sequence
+                if current_seq:
+                    sequences.append((f"seq_{seq_counter}", current_seq))
+                    seq_counter += 1
+                current_seq = [p]
+            else:
+                current_seq.append(p)
+            last_dt = dt
+        if current_seq:
+            sequences.append((f"seq_{seq_counter}", current_seq))
+        return sequences
 
 
 def smooth_classification_results_sequence_level(
-    predictions, time_gap_minutes=3, keep_original_predictions=False
+    predictions,
+    time_gap_minutes=3,
+    keep_original_predictions=False,
+    group_by_folder=False,
 ):
     """
     For each sequence, assign the dominant class (by count) to all images in the sequence.
     Adds 'seq_id' and 'smoothed_class' to each prediction.
     """
-    sequences = group_into_sequences(predictions, time_gap_minutes)
+
+    def is_blank_prediction(pred):
+        val = pred.get("prediction")
+        if not val:
+            return True
+        last_label = val.split(";")[-1].strip()
+        return last_label == "blank"
+
+    sequences = group_into_sequences(predictions, time_gap_minutes, group_by_folder)
     smoothed = []
     for seq_id, seq_preds in sequences:
-        # Find dominant class (by count of top-1 prediction)
-        top_classes = [p.get("prediction") for p in seq_preds if "prediction" in p]
+        # Exclude predictions where the last label is 'blank' or prediction is missing/None
+        top_classes = [
+            p.get("prediction") for p in seq_preds if not is_blank_prediction(p)
+        ]
         if top_classes:
             dominant_class = Counter(top_classes).most_common(1)[0][0]
         else:
@@ -74,7 +103,11 @@ def smooth_classification_results_sequence_level(
             p["smoothed_class_score"] = max_prob
             # Only update prediction if detections are present and non-empty
             has_detection = bool(p.get("detections"))
-            if not keep_original_predictions and has_detection:
+            if (
+                not keep_original_predictions
+                and has_detection
+                and dominant_class is not None
+            ):
                 p["prediction"] = dominant_class
                 p["prediction_score"] = max_prob
             smoothed.append(p)
@@ -106,6 +139,11 @@ def main():
         action="store_true",
         help="Do not overwrite original prediction fields",
     )
+    parser.add_argument(
+        "--group_by_folder",
+        action="store_true",
+        help="Group all images in the same folder (from 'filepath' field) into a single sequence, ignoring time gaps.",
+    )
     args = parser.parse_args()
 
     preds = load_json(args.predictions_json)
@@ -116,6 +154,7 @@ def main():
         preds,
         time_gap_minutes=args.time_gap_minutes,
         keep_original_predictions=args.keep_original_predictions,
+        group_by_folder=args.group_by_folder,
     )
     output_path = get_smoothed_output_path(args.predictions_json)
     save_json({"predictions": smoothed}, output_path)

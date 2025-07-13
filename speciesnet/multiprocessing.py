@@ -28,12 +28,12 @@ import multiprocessing as mp
 from multiprocessing.managers import SyncManager
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
-import os
 import queue
 import threading
 import traceback
 from datetime import datetime
 from typing import Callable, Literal, Optional, Union
+import os
 
 from absl import logging
 from tqdm import tqdm
@@ -66,37 +66,68 @@ SyncManager.register("Detector", SpeciesNetDetector)
 SyncManager.register("Ensemble", SpeciesNetEnsemble)
 
 
-def extract_datetime_from_image(filepath: str) -> Optional[str]:
-    """Extract datetime from image EXIF data or file modification time.
-
-    Args:
-        filepath: Path to the image file.
-
-    Returns:
-        ISO 8601 formatted datetime string, or None if extraction fails.
+def extract_image_metadata(filepath: str):
     """
+    Extract datetime, camera_id, and GPS coordinates from image EXIF only.
+    Returns a dict with keys: datetime, camera_id, latitude, longitude.
+    If not found, values are None.
+    """
+    metadata = {
+        "datetime": None,
+        "camera_id": None,
+        "latitude": None,
+        "longitude": None,
+    }
     try:
-        # Try to extract EXIF DateTimeOriginal
         img = PIL.Image.open(filepath)
         exif = img._getexif()
-        if exif:
-            # Look for DateTimeOriginal tag
-            for tag_id in exif:
-                tag = PIL.ExifTags.TAGS.get(tag_id, tag_id)
-                if tag == "DateTimeOriginal":
-                    dt_str = exif[tag_id]
-                    # Parse and format as ISO 8601
-                    dt = datetime.strptime(dt_str, "%Y:%m:%d %H:%M:%S")
-                    return dt.isoformat()
+        if exif is not None:
+            exif_data = {PIL.ExifTags.TAGS.get(k, k): v for k, v in exif.items()}
+            # Datetime
+            dt = exif_data.get("DateTimeOriginal") or exif_data.get("DateTime")
+            if dt:
+                try:
+                    metadata["datetime"] = datetime.strptime(
+                        dt, "%Y:%m:%d %H:%M:%S"
+                    ).isoformat()
+                except Exception:
+                    metadata["datetime"] = None
+            # Camera ID
+            for tag in ["ImageDescription", "CameraOwnerName", "BodySerialNumber"]:
+                if tag in exif_data:
+                    metadata["camera_id"] = exif_data[tag]
+                    break
+            # GPS
+            gps_info = exif_data.get("GPSInfo")
+            if gps_info:
 
-        # Fallback to file modification time
-        mtime = os.path.getmtime(filepath)
-        dt = datetime.fromtimestamp(mtime)
-        return dt.isoformat()
+                def _convert_gps(coord, ref):
+                    d, m, s = [float(x[0]) / float(x[1]) for x in coord]
+                    val = d + m / 60.0 + s / 3600.0
+                    if ref in ["S", "W"]:
+                        val = -val
+                    return val
 
-    except Exception as e:
-        logging.warning(f"Failed to extract datetime from {filepath}: {e}")
-        return None
+                gps_tags = {
+                    PIL.ExifTags.GPSTAGS.get(k, k): v for k, v in gps_info.items()
+                }
+                if "GPSLatitude" in gps_tags and "GPSLatitudeRef" in gps_tags:
+                    try:
+                        metadata["latitude"] = _convert_gps(
+                            gps_tags["GPSLatitude"], gps_tags["GPSLatitudeRef"]
+                        )
+                    except Exception:
+                        metadata["latitude"] = None
+                if "GPSLongitude" in gps_tags and "GPSLongitudeRef" in gps_tags:
+                    try:
+                        metadata["longitude"] = _convert_gps(
+                            gps_tags["GPSLongitude"], gps_tags["GPSLongitudeRef"]
+                        )
+                    except Exception:
+                        metadata["longitude"] = None
+    except Exception:
+        pass
+    return metadata
 
 
 class RepeatedAction(threading.Thread):
@@ -258,7 +289,7 @@ def _prepare_detector_input(
     try:
         img = detector.preprocess(img)
         detector_queue.put((filepath, img))
-    except:
+    except Exception:
         detector_queue.put((filepath, None))
         raise
 
@@ -320,7 +351,7 @@ def _prepare_classifier_input(
     try:
         img = classifier.preprocess(img, bboxes=bboxes)
         classifier_queue.put((filepath, img))
-    except:
+    except Exception:
         classifier_queue.put((filepath, None))
         raise
 
@@ -458,12 +489,14 @@ def _combine_results(  # pylint: disable=too-many-positional-arguments
         partial_predictions=partial_predictions,
     )
 
-    # Add datetime information to each prediction
+    # Add metadata information to each prediction
     for result in ensemble_results:
         if "filepath" in result:
-            datetime_str = extract_datetime_from_image(result["filepath"])
-            if datetime_str:
-                result["datetime"] = datetime_str
+            meta = extract_image_metadata(result["filepath"])
+            result["datetime"] = meta["datetime"]
+            result["camera_id"] = meta["camera_id"]
+            result["latitude"] = meta["latitude"]
+            result["longitude"] = meta["longitude"]
 
     predictions_dict = {"predictions": ensemble_results}
     if predictions_json:
